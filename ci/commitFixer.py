@@ -1,7 +1,7 @@
 # -*- coding: utf-8-*-
 
 """
-Prepares the workspace for commit. Fixes all common formatting errors, etc.
+Prepares the workspace for commit. Fixes all common formatting errors.
 
 Usage:
 Simply run this script before you commit your changes to the repository.
@@ -15,9 +15,20 @@ import sys
 import re
 import mimetypes
 import platform
+import subprocess
 
 
 _errors_found = False
+
+EXIFTOOL_PATHS_TO_TRY = [
+    "exiftool",
+    "D:\\Standalone\\exiftool.exe",
+]
+SKIPPED_PATHS = [
+]
+
+_skipped_paths_absolute = None  # dynamic
+_images_to_be_fixed = []
 
 
 def fix_unix(buf):
@@ -25,7 +36,7 @@ def fix_unix(buf):
     Fix line delimiters in the string (should be UNIX), return the fixed
     string.
     """
-    return buf.replace("\r\n", "\n").replace("\r", "\n")
+    return buf.replace("\r\n", "\n")
 
 
 _trailing_whitespace_regex = re.compile(r"[ \t]+$", re.MULTILINE)
@@ -57,7 +68,7 @@ def fix_tabs(buf, path):
         ".php", ".php3", ".inc", ".js", ".html", ".tpl", ".java", ".css",
         ".in", ".py", ".cpp", ".bat", ".h", ".tmpl", ".rst", ".xml", ".sh",
         ".sql", ".xsd", ".txt", ".htm", ".c", ".dtd", ".php.old", ".svg",
-        ".wlx", ".php.example"
+        ".wlx", ".php.example", ".wsgi"
     ]
     skip = True
     for ending in apply_for:
@@ -90,12 +101,14 @@ def check_if_binary(path, buf):
     # First, just check the file extension.
     #
     binary = [
-        ".phar", ".z", ".map", ".ico", ".dll", ".exe", ".dat", ".psd",
+        ".phar", ".z", ".map", ".ico", ".dll", ".exe", ".gz", ".ini", ".log",
+        ".zip", ".vsd", ".pyc", ".po", ".mo", ".dat", ".psd",
         ".email", ".mo", ".po", ".patch", ".swf", ".mp3", ".gz", ".ttf", ".7z",
     ]
     non_binary = [
         ".php", ".inc", ".tpl", ".cmd", ".rst", ".xml.in", ".sh.in", ".py.in",
-        ".json", ".cpp", ".sql", ".tmpl", ".xsd", ".json", ".txt", ".txt.old",
+        ".json", ".cpp", ".sql", ".tmpl", ".xsd", ".wsgi", ".wsgi.in",
+        ".txt", ".txt.old",
         ".php.example", ".as", ".svg", ".kml", ".php.old", ".dtd"
     ]
     for ext in binary:
@@ -141,8 +154,26 @@ def fix_file(path):
     #
     # Skip hidden files and directories (like ".git" or IDE's ".settings").
     #
+    path = path.replace("\\", "/")
     if "\\." in path or "/." in path:
         return
+    #
+    # Skip external libraries.
+    #
+    if any(path.startswith(x) for x in _skipped_paths_absolute):
+        return
+    #
+    # Images
+    #
+    image_exts = [
+        ".jpg", ".jpeg", ".png", ".gif"
+    ]
+    if any(path.endswith(ext) for ext in image_exts):
+        _images_to_be_fixed.append(path)
+        return
+    #
+    # Read and analyze file contents.
+    #
     f = open(path, 'rb')
     buf = ""
     while True:
@@ -151,6 +182,7 @@ def fix_file(path):
             break
         buf += chunk
     f.close()
+    prev_content = buf
     is_binary = check_if_binary(path, buf)
     if is_binary:
         return
@@ -158,19 +190,61 @@ def fix_file(path):
         buf = fix_unix(buf)
         buf = fix_trailing_whitespace(buf)
         buf = fix_tabs(buf, path)
-        f = open(path, "wb")
-        f.write(buf)
-        f.close()
+        if prev_content != buf:
+            f = open(path, "wb")
+            f.write(buf)
+            f.close()
     except Exception, e:
         sys.stderr.write("Err: " + path + " - " + e.message + "\n")
         _errors_found = True
 
 
+def make_groups(count, source):
+    """Podziel elementy z iteratora source na grupy o maksymalnej wielkości count
+    (ostatni element podziału może mieć mniej wartości niż count). Metoda działa
+    podobnie do make_tuples, lecz zwraca listy (nie krotki) i nie kończy się błędem,
+    w przypadku, gdy len(source) nie jest podzielne przez count. Przydaje się,
+    gdy chcemy skorzystać z metody, która nakłada limit na ilość jednocześnie
+    przetwarzanych argumentów (dzielimy argumenty na grupy wielkości niewiększej
+    niż limit)."""
+    it = iter(source)
+    try:
+        while True:
+            group = []
+            for _ in xrange(0, count):
+                group.append(it.next())
+            yield group
+    except StopIteration:
+        if len(group) > 0:
+            yield group
+
+
+def fix_images(filepaths):
+    """Run exiftool and remove all unwanted metadata."""
+    success = False
+    for group in make_groups(100, filepaths):
+        for path in EXIFTOOL_PATHS_TO_TRY:
+            try:
+                retcode = subprocess.call([path, "-all="] + group)
+                if retcode == 0:
+                    success = True
+                    break
+            except Exception, e:
+                print str(e)
+    if not success:
+        _errors_found = True
+
+
 def fix_workspace(folder):
     """Find and fix all files in the given workspace."""
+    global _skipped_paths_absolute
+    _skipped_paths_absolute = [
+        os.path.join(folder, x).replace("\\", "/") for x in SKIPPED_PATHS
+    ]
     for dirname, dirnames, filenames in os.walk(folder):
         for filename in filenames:
             fix_file(os.path.join(dirname, filename))
+    fix_images(_images_to_be_fixed)
 
 
 if __name__ == "__main__":
